@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""hserv — a tiny CLI for building static-site web servers in HolyC.
+
+Subcommands:
+    create <name>   Scaffold a new project in ./<name>/
+    build           Compile the current project to ./server
+    run             build, then exec ./server
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import string
+import subprocess
+import sys
+from pathlib import Path
+
+HSERV_HOME = Path(__file__).resolve().parent
+FRAMEWORK_DIR = HSERV_HOME / "framework"
+TEMPLATES_DIR = HSERV_HOME / "templates"
+PROJECT_TEMPLATE = TEMPLATES_DIR / "project"
+MAIN_TMPL = TEMPLATES_DIR / "main.HC.tmpl"
+ROUTER_TMPL = TEMPLATES_DIR / "router.HC.tmpl"
+
+CONFIG_FILE = "hserv.conf"
+BUILD_DIR = ".hserv"
+OUTPUT_BINARY = "server"
+
+DEFAULTS = {
+    "port": "8080",
+    "host": "*",
+    "pages_dir": "pages",
+    "public_dir": "public",
+}
+
+# Safe dir names: relative path, no traversal, no shell metachars.
+SAFE_DIR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./-]*$")
+# Safe host: '*' or hostname/IP-like.
+SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9.\-*]+$")
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"hserv: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def parse_config(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        die(f"no {CONFIG_FILE} in {path.parent} — run `hserv create <name>` first")
+    cfg = dict(DEFAULTS)
+    for lineno, raw in enumerate(path.read_text().splitlines(), start=1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if "=" not in line:
+            die(f"{path}:{lineno}: expected `key = value`, got: {raw!r}")
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key not in DEFAULTS:
+            die(f"{path}:{lineno}: unknown key {key!r} (known: {sorted(DEFAULTS)})")
+        cfg[key] = value
+    validate_config(cfg, path)
+    return cfg
+
+
+def validate_config(cfg: dict[str, str], path: Path) -> None:
+    try:
+        port = int(cfg["port"])
+    except ValueError:
+        die(f"{path}: port must be an integer, got {cfg['port']!r}")
+    if not (1 <= port <= 65535):
+        die(f"{path}: port {port} out of range 1-65535")
+
+    if not SAFE_HOST_RE.match(cfg["host"]):
+        die(f"{path}: host {cfg['host']!r} has unsupported characters")
+
+    for key in ("pages_dir", "public_dir"):
+        value = cfg[key]
+        if value.startswith("/") or ".." in Path(value).parts:
+            die(f"{path}: {key} must be a relative path without '..' (got {value!r})")
+        if not SAFE_DIR_RE.match(value):
+            die(f"{path}: {key} {value!r} has unsupported characters")
+
+
+def render_template(tmpl_path: Path, out_path: Path, cfg: dict[str, str]) -> None:
+    tmpl = string.Template(tmpl_path.read_text())
+    out_path.write_text(tmpl.substitute(cfg))
+
+
+def cmd_create(args: argparse.Namespace) -> None:
+    dest = Path(args.name).resolve()
+    if dest.exists():
+        die(f"refusing to overwrite existing path: {dest}")
+    shutil.copytree(PROJECT_TEMPLATE, dest)
+    print(f"created {dest}")
+    print(f"  cd {dest.name} && hserv run")
+
+
+def cmd_build(args: argparse.Namespace) -> Path:
+    project = Path.cwd()
+    cfg = parse_config(project / CONFIG_FILE)
+
+    pages_dir = project / cfg["pages_dir"]
+    if not pages_dir.is_dir():
+        die(f"pages_dir not found: {pages_dir}")
+    if not (pages_dir / "index.html").is_file():
+        die(f"missing entrypoint: {pages_dir / 'index.html'}")
+
+    build_dir = project / BUILD_DIR
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
+    build_dir.mkdir()
+    shutil.copytree(FRAMEWORK_DIR, build_dir / "framework")
+
+    render_template(MAIN_TMPL, build_dir / "main.HC", cfg)
+    render_template(ROUTER_TMPL, build_dir / "router.HC", cfg)
+
+    if shutil.which("hcc") is None:
+        die("hcc not found in PATH — install holyc-lang: https://github.com/Jamesbarford/holyc-lang")
+
+    output = project / OUTPUT_BINARY
+    rc = subprocess.call(
+        ["hcc", "-o", str(output), str(build_dir / "main.HC")],
+        cwd=project,
+    )
+    if rc != 0:
+        die(f"hcc exited with status {rc}", code=rc)
+
+    print(f"built {output}")
+    return output
+
+
+def cmd_run(args: argparse.Namespace) -> None:
+    binary = cmd_build(args)
+    os.execv(str(binary), [str(binary)])
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="hserv", description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_create = sub.add_parser("create", help="scaffold a new hserv project")
+    p_create.add_argument("name", help="directory to create")
+    p_create.set_defaults(func=cmd_create)
+
+    p_build = sub.add_parser("build", help="compile the current project")
+    p_build.set_defaults(func=cmd_build)
+
+    p_run = sub.add_parser("run", help="build, then run the server")
+    p_run.set_defaults(func=cmd_run)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
