@@ -4,6 +4,16 @@ A tiny framework for building static-site web servers in [HolyC](https://holyc-l
 
 You write HTML in `pages/`, run `hserv build`, and get a single binary that serves your site.
 
+## Performance
+
+### Memory
+```
+󰣇 ~ ❯ kubectl top pods
+NAME                                         CPU(cores)   MEMORY(bytes)   
+hserv-app                                    1m           5Mi             
+nextjs-app                                   1m           68Mi
+```
+
 ## Install
 
 You need the HolyC compiler [`hcc`](https://github.com/Jamesbarford/holyc-lang) on `PATH`. Then pick one:
